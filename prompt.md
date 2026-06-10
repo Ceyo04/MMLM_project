@@ -38,17 +38,16 @@
 
 ### 2.1 模型选择
 
-**主模型：Qwen2.5-VL-7B-Instruct**
+**主模型：Qwen2.5-VL-3B-Instruct**
 
 - 开源、可本地部署、中文能力强
-- 支持图像+文本多模态输入
+- 支持图像+文本多模态输入、多分辨率输入
 - 在 VQA、TextVQA、文档理解等任务上表现优秀
-- 7B 规模可在单张 24GB GPU（RTX 3090/4090）上以 bfloat16 运行
+- 3B 规模，使用 bfloat16 加载仅需约 6-7GB 显存，**完美适配 8GB 显卡（RTX 4060）**
 
 **备选方案（任一均可，若主模型不可用）：**
-- LLaMA 3.2 Vision（11B，需 24GB+）
-- Gemma 3-Vision
-- GLM-4.6V-Flash（API 调用）
+- Qwen2.5-VL-3B-Instruct（需 ≥16GB 显存，当前硬件不适用）
+- GLM-4.6V-Flash（API 调用，无需本地 GPU）
 
 ### 2.2 推理框架
 
@@ -71,25 +70,29 @@ accelerate >= 0.26.0            # 混合精度推理/设备映射
 
 **WSL2 用户必须注意**（见 2.6 节）。
 
-### 2.4 推理精度
+### 2.4 推理精度与显存控制
 
 **统一使用 `torch.bfloat16` 加载模型。**
 
-在 RTX 3090/4090（24GB）上，Qwen2.5-VL-7B 以 bfloat16 加载约占用 15-16GB 显存，安全裕度充足。**不使用 bitsandbytes 4-bit 量化**——在当前 transformers 版本下，4-bit 量化作用于视觉编码器存在已知精度雪崩 Bug，会导致中文输出乱码，且 24GB 显存完全不需要量化。
+当前硬件为 **RTX 4060（8GB VRAM）**。Qwen2.5-VL-3B 以 bfloat16 加载模型权重约占用 6GB 显存。但多模态模型的**激活显存开销**取决于输入图片分辨率——高分辨率图片会产生巨大的中间张量，极易超出剩余的 2GB 显存预算。
 
-### 2.5 微调方案（可选，加分项）
+**【极限显存防爆指令】** 必须在 `src/inference/processor.py` 中强制限制输入图片分辨率：
 
-若算力允许，使用 **LoRA（PEFT）** 在自建中文图文问答数据上微调：
-
+```python
+processor = AutoProcessor.from_pretrained(model_path, min_pixels=256*28*28, max_pixels=640*28*28)
+# max_pixels=501760 相当于最大约 700×700 分辨率区域
+# 也可直接设置：processor.image_processor.max_pixels = 501760
 ```
-peft >= 0.11.0
-```
 
-训练策略：
-- 冻结视觉编码器（ViT），仅微调 LLM 部分的 Q/K/V 投影层
-- rank=16, alpha=32, target_modules=["q_proj","k_proj","v_proj","o_proj"]
-- 学习率 2e-4，batch_size=2，gradient_accumulation_steps=4
-- 训练 1-2 epoch，使用 bfloat16 混合精度，在单张 24GB GPU 上完成
+绝对不能让模型按原始高分辨率（如 4K）处理图片，否则必定 OOM。
+
+**不使用 bitsandbytes 4-bit 量化**——在当前 transformers 版本下，4-bit 量化作用于视觉编码器存在已知精度雪崩 Bug，会导致中文输出乱码。且对于 3B 模型，量化节省的显存有限（约 1-2GB），但引入的精度损失不可接受。
+
+### 2.5 微调方案
+
+**由于当前显卡仅 8GB VRAM，彻底放弃 LoRA 微调阶段。** 不要生成任何关于微调的代码或脚本。即使 3B 模型，LoRA 微调的反向传播和优化器状态所需额外显存也会超出 8GB 预算。
+
+将全部精力放在**推理管线优化**和**评测质量**上——精心设计的 System Prompt 和参数调优可以大幅提升 3B 模型的零样本表现，弥补不做微调的差距。
 
 ### 2.6 WSL2 环境特别注意事项
 
@@ -195,10 +198,13 @@ demo.launch(server_name="0.0.0.0", server_port=7860)
 
 ### 阶段零：环境搭建
 
-**步骤 0.1** 创建 conda 环境
+**步骤 0.1** 创建并激活虚拟环境
+
+由于现代 Linux 系统的 PEP 668 限制，必须使用 `venv`，**禁止使用 conda**。
+
 ```bash
-conda create -n vlm-qa python=3.10 -y
-conda activate vlm-qa
+python3 -m venv vlm-env
+source vlm-env/bin/activate
 ```
 
 **步骤 0.2** 安装依赖
@@ -207,10 +213,7 @@ pip install torch==2.3.1 torchvision==0.18.1 --index-url https://download.pytorc
 pip install "transformers>=4.49.0" accelerate>=0.26.0
 pip install "qwen-vl-utils[decord]==0.0.8"
 pip install gradio==4.36.1 pillow numpy opencv-python
-pip install datasets  # HuggingFace datasets，用于流式加载
-pip install matplotlib seaborn pandas  # 可视化
-# 仅当决定做 LoRA 微调时安装：
-pip install peft
+pip install datasets matplotlib seaborn pandas
 ```
 
 **步骤 0.3** 下载模型
@@ -220,10 +223,10 @@ pip install peft
 ```bash
 # 使用 modelscope（国内下载更快）
 pip install modelscope
-modelscope download --model qwen/Qwen2.5-VL-7B-Instruct --local_dir ~/models/Qwen2.5-VL-7B-Instruct
+modelscope download --model qwen/Qwen2.5-VL-3B-Instruct --local_dir ~/models/Qwen2.5-VL-3B-Instruct
 
 # 或使用 huggingface-cli
-huggingface-cli download Qwen/Qwen2.5-VL-7B-Instruct --local-dir ~/models/Qwen2.5-VL-7B-Instruct
+huggingface-cli download Qwen/Qwen2.5-VL-3B-Instruct --local-dir ~/models/Qwen2.5-VL-3B-Instruct
 ```
 
 **步骤 0.4** 验证环境
@@ -663,13 +666,14 @@ theme: default
 
 ## 七、常见问题与应对
 
-### Q1：24GB 显存不够怎么办？
+### Q1：8GB 显存不够怎么办？
 
-bfloat16 加载 Qwen2.5-VL-7B 约 15-16GB，正常情况下有 6-8GB 裕度。若仍 OOM：
-1. 关闭其他占用显存的进程（`nvidia-smi` 查看）
-2. 使用 `device_map="auto"` 让 accelerate 自动分配
-3. 如果以上无效，切换更小的模型（Qwen2.5-VL-2B）
-4. **不使用 4-bit 量化**（精度雪崩风险）
+bfloat16 加载 Qwen2.5-VL-3B 约 6-7GB，正常情况下有 1-2GB 裕度。若仍 OOM：
+1. 关闭所有其他占用显存的进程（`nvidia-smi` 查看），浏览器也占用显存
+2. 严格限制输入图片分辨率：`max_pixels=501760`（约 700×700），绝不能跳过此限制
+3. 推理时使用 `torch.no_grad()` 上下文，避免构建计算图
+4. 如果以上无效，切换 Qwen2.5-VL-2B 或使用云端 API（GLM-4.6V-Flash）
+5. **不使用 4-bit 量化**（精度雪崩风险，且省不了多少显存）
 
 ### Q2：模型生成中文回答质量差？
 
