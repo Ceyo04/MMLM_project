@@ -46,7 +46,7 @@
 - 3B 规模，使用 bfloat16 加载仅需约 6-7GB 显存，**完美适配 8GB 显卡（RTX 4060）**
 
 **备选方案（任一均可，若主模型不可用）：**
-- Qwen2.5-VL-3B-Instruct（需 ≥16GB 显存，当前硬件不适用）
+- Qwen2.5-VL-7B-Instruct（需 ≥16GB 显存，当前硬件不适用）
 - GLM-4.6V-Flash（API 调用，无需本地 GPU）
 
 ### 2.2 推理框架
@@ -98,7 +98,7 @@ processor = AutoProcessor.from_pretrained(model_path, min_pixels=256*28*28, max_
 
 当前工作目录位于 `/mnt/d/`（Windows DrvFs 挂载），存在以下风险，必须处理：
 
-**I/O 性能：** 通过 `/mnt/d/` 访问 Windows 文件系统的 I/O 显著慢于 WSL2 原生 ext4（`~/`）。模型权重（~15GB）的首次加载会较慢，但这是一次性开销，可接受。图片数据集的频繁小文件读写应避免落盘。
+**I/O 性能：** 通过 `/mnt/d/` 访问 Windows 文件系统的 I/O 显著慢于 WSL2 原生 ext4（`~/`）。模型权重（~7GB）的首次加载会较慢，但这是一次性开销，可接受。图片数据集的频繁小文件读写应避免落盘。
 
 **Gradio 网络可达性：** WSL2 默认 NAT 模式下，服务绑定 `127.0.0.1` 会导致 Windows 宿主机浏览器无法访问。**所有 Gradio 启动必须使用：**
 ```python
@@ -240,7 +240,7 @@ print('Qwen2_5_VLForConditionalGeneration import OK')
 "
 ```
 
-**阶段零验证标准：** 上述 import 无报错；`nvidia-smi` 显示 ≥20GB 可用显存。
+**阶段零验证标准：** 上述 import 无报错；`nvidia-smi` 显示 ≥4GB 可用显存（8GB 显卡需留出模型加载余量）。
 
 ---
 

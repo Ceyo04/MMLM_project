@@ -1,0 +1,17 @@
+# 默认配置
+model:
+  name: "Qwen2.5-VL-3B-Instruct"
+  # 模型路径在 local.yaml 中覆盖
+
+generation:
+  max_new_tokens: 256
+  temperature: 0.3
+  top_p: 0.9
+  do_sample: false
+  repetition_penalty: 1.05
+
+image:
+  min_pixels: 256  # 256*28*28 = 200704
+  max_pixels: 640  # 640*28*28 = 501760, 适配 8GB 显存
+
+device: "auto"  # cuda or auto

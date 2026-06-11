@@ -1,0 +1,4 @@
+主机 WSL2终端运行。
+CPU：12th Gen Intel(R) Core(TM) i5-12600KF
+GPU：NVIDIA GeForce RTX 4060
+内存：32GB DDR4
