@@ -245,13 +245,12 @@ def main() -> None:
         "show_error": False,
     }
 
-    # Gradio 6.x: css 和 title 需在 launch() 中指定
+    # Gradio 6.x: css 需在 launch() 中指定；title 在 6.x 中不支持，通过 Markdown 标题展示
     if GRADIO_VERSION >= Version("6.0"):
         launch_kwargs["css"] = """
         .status-bar { font-size: 0.85em; color: #666; text-align: center; padding: 8px; }
         .title { text-align: center; font-size: 1.5em; font-weight: bold; margin-bottom: 10px; }
         """
-        launch_kwargs["title"] = "VLM 智能图文问答助手"
 
     logger.info(f"Starting Gradio Web UI on 0.0.0.0:7860 (Gradio {gr.__version__})")
 
