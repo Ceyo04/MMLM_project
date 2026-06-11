@@ -1,241 +1,188 @@
 """
 app.py - Gradio Web UI
 
-提供多模态图文问答的 Web 交互界面：
-- 图片上传
-- 中文文本输入
-- 多轮对话
-- 场景选择
-- 模型状态显示
-
-兼容 Gradio >= 4.x（自动适配 5.x/6.x API 变更）。
+基于 Qwen2.5-VL 的多模态图文问答助手。
+参考 Gradio 6.x 官方 Chatbot 用法：history 为 [{"role":"user","content":...}, ...] 格式。
 """
 
 from __future__ import annotations
 
 import logging
 import sys
+import time
 from pathlib import Path
 
-# 确保项目根目录在 sys.path 中
 _project_root = Path(__file__).resolve().parent.parent.parent
 if str(_project_root) not in sys.path:
     sys.path.insert(0, str(_project_root))
 
 import gradio as gr
 import torch
-from packaging.version import Version
 from PIL import Image
+from qwen_vl_utils import process_vision_info
 
 from src.config.settings import get_config
-from src.inference.generate import generate_single, reset_history
 
 logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 
-# Gradio 版本号
-GRADIO_VERSION = Version(gr.__version__)
 
-
-class ChatSession:
-    """管理单个会话的状态（图片、对话历史、场景）。"""
+class VLMChatbot:
+    """封装模型加载与推理。"""
 
     def __init__(self) -> None:
-        self.image: Image.Image | None = None
-        self.history: list[dict] = []
-        self.scene: str = "auto"
-        self._cfg = get_config()
+        cfg = get_config()
+        logger.info(f"Loading model from {cfg.model_path}...")
 
-    def set_image(self, img: Image.Image | None) -> None:
-        self.image = img
-        # 换图时重置对话历史
-        self.history = reset_history(self.scene)
+        self.model = self._load_model(cfg)
+        self.processor = self._load_processor(cfg)
+        self.cfg = cfg
 
-    def set_scene(self, scene: str) -> None:
-        self.scene = scene
-        # 切换场景时重置对话历史
-        self.history = reset_history(self.scene)
+        if torch.cuda.is_available():
+            free, total = torch.cuda.mem_get_info()
+            used = total - free
+            logger.info(f"Model loaded. VRAM: {used / 1024**3:.1f} GB / {total / 1024**3:.1f} GB")
 
-    def chat(self, message: str, history: list[dict]) -> tuple[list[dict], "ChatSession"]:
+    @staticmethod
+    def _load_model(cfg):  # noqa: ANN205
+        from transformers import Qwen2_5_VLForConditionalGeneration
+        return Qwen2_5_VLForConditionalGeneration.from_pretrained(
+            cfg.model_path,
+            torch_dtype=torch.bfloat16,
+            device_map=cfg.device,
+            trust_remote_code=True,
+            low_cpu_mem_usage=True,
+        ).eval()
+
+    @staticmethod
+    def _load_processor(cfg):  # noqa: ANN205
+        from transformers import AutoProcessor
+        return AutoProcessor.from_pretrained(
+            cfg.model_path,
+            trust_remote_code=True,
+            min_pixels=cfg.min_pixels_actual,
+            max_pixels=cfg.max_pixels_actual,
+        )
+
+    def predict(self, image: Image.Image | None, history: list[dict], user_text: str) -> str:
         """
-        处理一轮对话。
+        根据图片、对话历史和用户输入生成回答。
 
         Args:
-            message: 用户输入文本
-            history: Gradio Chatbot 格式：
-                     [{"role": "user", "content": "..."}, {"role": "assistant", "content": "..."}]
+            image: 用户上传的 PIL Image（可为 None）
+            history: [{"role":"user","content":...}, {"role":"assistant","content":...}, ...]
+            user_text: 当前轮用户问题文本
 
         Returns:
-            (updated_gradio_history, updated_session)
+            模型回答字符串
         """
-        if self.image is None:
-            history.append({"role": "user", "content": message})
-            history.append({"role": "assistant", "content": "⚠️ 请先上传图片！"})
-            return history, self
+        # 从 history 重建 messages（用于多轮对话上下文）
+        messages: list[dict] = []
+        for msg in history:
+            messages.append({"role": msg["role"], "content": msg["content"]})
+
+        # 构造当前轮用户消息
+        current_content: list[dict] = []
+        if image is not None:
+            current_content.append({"type": "image", "image": image})
+        current_content.append({"type": "text", "text": user_text})
+        messages.append({"role": "user", "content": current_content})
 
         try:
-            answer, self.history = generate_single(
-                self.image,
-                message,
-                history=self.history,
-                scene=self.scene,
+            t0 = time.time()
+
+            text = self.processor.apply_chat_template(
+                messages, tokenize=False, add_generation_prompt=True
             )
-            history.append({"role": "user", "content": message})
-            history.append({"role": "assistant", "content": answer})
+            image_inputs, video_inputs = process_vision_info(messages)
+
+            inputs = self.processor(
+                text=[text],
+                images=image_inputs,
+                videos=video_inputs,
+                padding=True,
+                return_tensors="pt",
+            )
+            inputs = {k: v.to(self.model.device) for k, v in inputs.items()}
+
+            t1 = time.time()
+            with torch.no_grad():
+                generated_ids = self.model.generate(
+                    **inputs,
+                    max_new_tokens=self.cfg.max_new_tokens,
+                    do_sample=self.cfg.do_sample,
+                    temperature=self.cfg.temperature if self.cfg.do_sample else None,
+                    top_p=self.cfg.top_p if self.cfg.do_sample else None,
+                    repetition_penalty=self.cfg.repetition_penalty,
+                )
+            t2 = time.time()
+
+            generated_ids_trimmed = [
+                out_ids[len(in_ids):] for out_ids, in_ids in zip(generated_ids, inputs["input_ids"])
+            ]
+            response = self.processor.batch_decode(
+                generated_ids_trimmed,
+                skip_special_tokens=True,
+                clean_up_tokenization_spaces=False,
+            )[0]
+
+            logger.info(f"Inference: preprocess={t1-t0:.2f}s, generate={t2-t1:.2f}s, total={t2-t0:.2f}s")
+            torch.cuda.empty_cache()
+            return response
+
         except Exception as e:
-            logger.error(f"Inference failed: {e}")
-            history.append({"role": "user", "content": message})
-            history.append({"role": "assistant", "content": f"⚠️ 推理出错：{str(e)}"})
-
-        return history, self
-
-
-def get_vram_info() -> str:
-    """获取当前显存使用情况。"""
-    if torch.cuda.is_available():
-        free, total = torch.cuda.mem_get_info()
-        used = total - free
-        return f"模型已就绪 | 显存: {used / 1024**3:.1f} GB / {total / 1024**3:.1f} GB"
-    return "模型已就绪 | 使用 CPU 推理"
-
-
-def _build_chatbot_kwargs() -> dict:
-    """根据 Gradio 版本构建 Chatbot 组件的参数字典。
-
-    Gradio 6.x 移除了 show_copy_button 等参数。
-    """
-    kwargs: dict = {
-        "label": "📝 对话记录",
-        "height": 500,
-    }
-    # Gradio >= 5: 使用新的 messages 格式 [{"role":"user","content":"..."}, ...]
-    if GRADIO_VERSION >= Version("5.0"):
-        kwargs["type"] = "messages"
-    # show_copy_button 在 Gradio < 5 可用，>= 5 已移除
-    if GRADIO_VERSION < Version("5.0"):
-        kwargs["show_copy_button"] = True
-    return kwargs
+            logger.error(f"Inference error: {e}")
+            return f"⚠️ 推理出错：{str(e)}"
 
 
 def build_ui() -> gr.Blocks:
     """构建 Gradio Blocks 界面。"""
     cfg = get_config()
+    chatbot_model = VLMChatbot()
 
-    # Gradio 6.x: css 和 title 从 Blocks 构造函数移至 launch()
-    blocks_kwargs: dict = {}
-    if GRADIO_VERSION < Version("6.0"):
-        blocks_kwargs["css"] = """
-        .status-bar { font-size: 0.85em; color: #666; text-align: center; padding: 8px; }
-        .title { text-align: center; font-size: 1.5em; font-weight: bold; margin-bottom: 10px; }
-        """
-        blocks_kwargs["title"] = "VLM 智能图文问答助手"
-
-    with gr.Blocks(**blocks_kwargs) as demo:
-        gr.Markdown(
-            '<div class="title">🖼️ VLM 智能图文问答助手</div>'
-            f'<div style="text-align:center;color:#888;margin-bottom:16px;">模型: {cfg.model_name} | 支持自然场景 & 文档/幻灯片问答</div>'
-        )
-
-        session_state = gr.State(ChatSession())
+    with gr.Blocks(title="VLM 智能图文问答助手") as demo:
+        gr.Markdown(f"""
+        # 🖼️ VLM 智能图文问答助手
+        ### 基于 {cfg.model_name} 的多模态对话系统
+        """)
 
         with gr.Row():
-            # 左侧：图片上传和问题输入
             with gr.Column(scale=1):
-                image_input = gr.Image(
-                    type="pil",
-                    label="📷 上传图片",
-                    height=320,
-                )
-                scene_selector = gr.Radio(
-                    choices=["auto", "natural_scene", "document_scene"],
-                    value="auto",
-                    label="🎯 场景模式",
-                    info="auto=自动判断 | natural_scene=自然场景 | document_scene=文档/幻灯片",
-                )
-                question_input = gr.Textbox(
-                    label="💬 输入你的问题",
-                    placeholder="例如：图中有几个人？这张表格的第三行数据是什么？",
-                    lines=2,
-                )
+                image_input = gr.Image(type="pil", label="📷 上传图片")
+
+            with gr.Column(scale=2):
+                chatbot = gr.Chatbot(label="📝 对话记录", height=500)
+
                 with gr.Row():
-                    send_btn = gr.Button("🚀 发送", variant="primary")
-                    clear_btn = gr.Button("🗑️ 清除对话")
+                    msg = gr.Textbox(
+                        label="💬 输入问题",
+                        placeholder="例如：图中有几个人？这是什么颜色？",
+                        scale=4,
+                    )
+                    send_btn = gr.Button("🚀 发送", variant="primary", scale=1)
 
-            # 右侧：对话历史
-            with gr.Column(scale=1):
-                chatbot = gr.Chatbot(**_build_chatbot_kwargs())
+                clear_btn = gr.Button("🗑️ 清空对话")
 
-        # 状态栏
-        status_bar = gr.Markdown(
-            '<div class="status-bar">⏳ 模型加载中... | 请稍候</div>'
-        )
-
-        # --- 事件绑定 ---
-
-        def on_image_change(img: Image.Image | None, session: ChatSession) -> tuple:
-            """图片上传后的处理：重置对话、更新状态。"""
-            session.set_image(img)
-            reset_chat: list = []
-            if img is None:
-                return reset_chat, session, "⚠️ 未上传图片，请先上传"
-            status = f"✅ 图片已上传 | {get_vram_info()}"
-            return reset_chat, session, status
-
-        image_input.change(
-            on_image_change,
-            inputs=[image_input, session_state],
-            outputs=[chatbot, session_state, status_bar],
-        )
-
-        def on_scene_change(scene: str, session: ChatSession) -> tuple:
-            """场景切换后的处理。"""
-            session.set_scene(scene)
-            return [], session
-
-        scene_selector.change(
-            on_scene_change,
-            inputs=[scene_selector, session_state],
-            outputs=[chatbot, session_state],
-        )
-
-        def on_send(message: str, history: list[dict], session: ChatSession) -> tuple:
-            """发送消息的处理函数。"""
+        def respond(message: str, history: list[dict], image: Image.Image | None) -> tuple[str, list[dict], Image.Image | None]:
+            """处理用户消息。"""
             if not message.strip():
-                return "", history, session, "⚠️ 请输入问题"
-            if session.image is None:
-                return "", history, session, "⚠️ 请先上传图片！"
-            new_history, new_session = session.chat(message, history)
-            status = get_vram_info()
-            return "", new_history, new_session, status
+                return "", history, image
 
-        send_btn.click(
-            on_send,
-            inputs=[question_input, chatbot, session_state],
-            outputs=[question_input, chatbot, session_state, status_bar],
-        )
-        question_input.submit(
-            on_send,
-            inputs=[question_input, chatbot, session_state],
-            outputs=[question_input, chatbot, session_state, status_bar],
-        )
+            bot_response = chatbot_model.predict(image, history, message)
 
-        def on_clear(session: ChatSession) -> tuple:
-            """清除对话的处理函数。"""
-            session.history = reset_history(session.scene)
-            message = "✅ 对话已清除" if session.image else "⚠️ 未上传图片"
-            return [], session, message
+            history.append({"role": "user", "content": message})
+            history.append({"role": "assistant", "content": bot_response})
 
-        clear_btn.click(
-            on_clear,
-            inputs=[session_state],
-            outputs=[chatbot, session_state, status_bar],
-        )
+            return "", history, image
 
-        # 页面加载时更新状态栏
-        demo.load(
-            lambda: get_vram_info(),
-            outputs=[status_bar],
-        )
+        def clear_history() -> tuple[list, None]:
+            """清空对话历史。"""
+            return [], None
+
+        # 事件绑定
+        send_btn.click(respond, [msg, chatbot, image_input], [msg, chatbot, image_input])
+        msg.submit(respond, [msg, chatbot, image_input], [msg, chatbot, image_input])
+        clear_btn.click(clear_history, None, [chatbot, image_input])
 
     return demo
 
@@ -243,34 +190,18 @@ def build_ui() -> gr.Blocks:
 def main() -> None:
     """启动 Gradio Web UI。"""
     demo = build_ui()
-
-    # 构建 launch 参数字典
-    launch_kwargs: dict = {
-        "server_name": "0.0.0.0",
-        "server_port": 7860,
-        "share": False,
-        "show_error": False,
-    }
-
-    # Gradio 6.x: css 需在 launch() 中指定；title 在 6.x 中不支持，通过 Markdown 标题展示
-    if GRADIO_VERSION >= Version("6.0"):
-        launch_kwargs["css"] = """
-        .status-bar { font-size: 0.85em; color: #666; text-align: center; padding: 8px; }
-        .title { text-align: center; font-size: 1.5em; font-weight: bold; margin-bottom: 10px; }
-        """
-
-    logger.info(f"Starting Gradio Web UI on 0.0.0.0:7860 (Gradio {gr.__version__})")
-
+    logger.info("Starting Gradio Web UI on 0.0.0.0:7860")
     try:
-        demo.launch(**launch_kwargs)
+        demo.launch(
+            server_name="0.0.0.0",
+            server_port=7860,
+            share=False,
+            show_error=False,
+        )
     except ValueError as e:
         if "localhost is not accessible" in str(e):
-            logger.warning(
-                "WSL2: Gradio localhost check failed. This is expected in WSL2. "
-                "Please manually access from Windows browser at http://localhost:7860"
-            )
-            launch_kwargs["share"] = True
-            demo.launch(**launch_kwargs)
+            logger.warning("WSL2: localhost check failed, retrying with share=True")
+            demo.launch(server_name="0.0.0.0", server_port=7860, share=True, show_error=False)
         else:
             raise
 
