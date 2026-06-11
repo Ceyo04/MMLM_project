@@ -7,6 +7,8 @@ app.py - Gradio Web UI
 - 多轮对话
 - 场景选择
 - 模型状态显示
+
+兼容 Gradio >= 4.x（自动适配 5.x/6.x API 变更）。
 """
 
 from __future__ import annotations
@@ -22,6 +24,7 @@ if str(_project_root) not in sys.path:
 
 import gradio as gr
 import torch
+from packaging.version import Version
 from PIL import Image
 
 from src.config.settings import get_config
@@ -29,6 +32,9 @@ from src.inference.generate import generate_single, reset_history
 
 logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
+
+# Gradio 版本号
+GRADIO_VERSION = Version(gr.__version__)
 
 
 class ChatSession:
@@ -89,16 +95,35 @@ def get_vram_info() -> str:
     return "模型已就绪 | 使用 CPU 推理"
 
 
+def _build_chatbot_kwargs() -> dict:
+    """根据 Gradio 版本构建 Chatbot 组件的参数字典。
+
+    Gradio 6.x 移除了 show_copy_button 等参数。
+    """
+    kwargs: dict = {
+        "label": "📝 对话记录",
+        "height": 500,
+    }
+    # show_copy_button 在 Gradio < 5 可用，>= 5 默认开启、参数移除
+    if GRADIO_VERSION < Version("5.0"):
+        kwargs["show_copy_button"] = True
+    return kwargs
+
+
 def build_ui() -> gr.Blocks:
     """构建 Gradio Blocks 界面。"""
     cfg = get_config()
 
-    css = """
-    .status-bar { font-size: 0.85em; color: #666; text-align: center; padding: 8px; }
-    .title { text-align: center; font-size: 1.5em; font-weight: bold; margin-bottom: 10px; }
-    """
+    # Gradio 6.x: css 和 title 从 Blocks 构造函数移至 launch()
+    blocks_kwargs: dict = {}
+    if GRADIO_VERSION < Version("6.0"):
+        blocks_kwargs["css"] = """
+        .status-bar { font-size: 0.85em; color: #666; text-align: center; padding: 8px; }
+        .title { text-align: center; font-size: 1.5em; font-weight: bold; margin-bottom: 10px; }
+        """
+        blocks_kwargs["title"] = "VLM 智能图文问答助手"
 
-    with gr.Blocks(css=css, title="VLM 智能图文问答助手") as demo:
+    with gr.Blocks(**blocks_kwargs) as demo:
         gr.Markdown(
             '<div class="title">🖼️ VLM 智能图文问答助手</div>'
             f'<div style="text-align:center;color:#888;margin-bottom:16px;">模型: {cfg.model_name} | 支持自然场景 & 文档/幻灯片问答</div>'
@@ -131,23 +156,19 @@ def build_ui() -> gr.Blocks:
 
             # 右侧：对话历史
             with gr.Column(scale=1):
-                chatbot = gr.Chatbot(
-                    label="📝 对话记录",
-                    height=500,
-                    show_copy_button=True,
-                )
+                chatbot = gr.Chatbot(**_build_chatbot_kwargs())
 
         # 状态栏
         status_bar = gr.Markdown(
-            f'<div class="status-bar">⏳ 模型加载中... | 请稍候</div>'
+            '<div class="status-bar">⏳ 模型加载中... | 请稍候</div>'
         )
 
         # --- 事件绑定 ---
 
-        def on_image_change(img: Image.Image | None, session: ChatSession) -> tuple[list, ChatSession, str]:
+        def on_image_change(img: Image.Image | None, session: ChatSession) -> tuple:
             """图片上传后的处理：重置对话、更新状态。"""
             session.set_image(img)
-            reset_chat = []
+            reset_chat: list = []
             if img is None:
                 return reset_chat, session, "⚠️ 未上传图片，请先上传"
             status = f"✅ 图片已上传 | {get_vram_info()}"
@@ -159,7 +180,7 @@ def build_ui() -> gr.Blocks:
             outputs=[chatbot, session_state, status_bar],
         )
 
-        def on_scene_change(scene: str, session: ChatSession) -> tuple[list, ChatSession]:
+        def on_scene_change(scene: str, session: ChatSession) -> tuple:
             """场景切换后的处理。"""
             session.set_scene(scene)
             return [], session
@@ -170,7 +191,7 @@ def build_ui() -> gr.Blocks:
             outputs=[chatbot, session_state],
         )
 
-        def on_send(message: str, history: list, session: ChatSession) -> tuple[str, list, ChatSession, str]:
+        def on_send(message: str, history: list, session: ChatSession) -> tuple:
             """发送消息的处理函数。"""
             if not message.strip():
                 return "", history, session, "⚠️ 请输入问题"
@@ -191,7 +212,7 @@ def build_ui() -> gr.Blocks:
             outputs=[question_input, chatbot, session_state, status_bar],
         )
 
-        def on_clear(session: ChatSession) -> tuple[list, ChatSession, str]:
+        def on_clear(session: ChatSession) -> tuple:
             """清除对话的处理函数。"""
             session.history = reset_history(session.scene)
             message = "✅ 对话已清除" if session.image else "⚠️ 未上传图片"
@@ -215,29 +236,35 @@ def build_ui() -> gr.Blocks:
 def main() -> None:
     """启动 Gradio Web UI。"""
     demo = build_ui()
-    logger.info("Starting Gradio Web UI on 0.0.0.0:7860")
+
+    # 构建 launch 参数字典
+    launch_kwargs: dict = {
+        "server_name": "0.0.0.0",
+        "server_port": 7860,
+        "share": False,
+        "show_error": False,
+    }
+
+    # Gradio 6.x: css 和 title 需在 launch() 中指定
+    if GRADIO_VERSION >= Version("6.0"):
+        launch_kwargs["css"] = """
+        .status-bar { font-size: 0.85em; color: #666; text-align: center; padding: 8px; }
+        .title { text-align: center; font-size: 1.5em; font-weight: bold; margin-bottom: 10px; }
+        """
+        launch_kwargs["title"] = "VLM 智能图文问答助手"
+
+    logger.info(f"Starting Gradio Web UI on 0.0.0.0:7860 (Gradio {gr.__version__})")
+
     try:
-        demo.launch(
-            server_name="0.0.0.0",
-            server_port=7860,
-            share=False,
-            show_error=False,
-        )
+        demo.launch(**launch_kwargs)
     except ValueError as e:
         if "localhost is not accessible" in str(e):
             logger.warning(
                 "WSL2: Gradio localhost check failed. This is expected in WSL2. "
                 "Please manually access from Windows browser at http://localhost:7860"
             )
-            logger.info(
-                "Re-launching with share=True as fallback (creates a public tunnel)..."
-            )
-            demo.launch(
-                server_name="0.0.0.0",
-                server_port=7860,
-                share=True,
-                show_error=False,
-            )
+            launch_kwargs["share"] = True
+            demo.launch(**launch_kwargs)
         else:
             raise
 
