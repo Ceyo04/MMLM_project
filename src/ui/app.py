@@ -56,19 +56,21 @@ class ChatSession:
         # 切换场景时重置对话历史
         self.history = reset_history(self.scene)
 
-    def chat(self, message: str, history: list[list[str | None]]) -> tuple[list[list[str | None]], "ChatSession"]:
+    def chat(self, message: str, history: list[dict]) -> tuple[list[dict], "ChatSession"]:
         """
         处理一轮对话。
 
         Args:
             message: 用户输入文本
-            history: Gradio Chatbot 格式的历史：[[user, bot], ...]
+            history: Gradio Chatbot 格式：
+                     [{"role": "user", "content": "..."}, {"role": "assistant", "content": "..."}]
 
         Returns:
             (updated_gradio_history, updated_session)
         """
         if self.image is None:
-            history.append([message, "⚠️ 请先上传图片！"])
+            history.append({"role": "user", "content": message})
+            history.append({"role": "assistant", "content": "⚠️ 请先上传图片！"})
             return history, self
 
         try:
@@ -78,10 +80,12 @@ class ChatSession:
                 history=self.history,
                 scene=self.scene,
             )
-            history.append([message, answer])
+            history.append({"role": "user", "content": message})
+            history.append({"role": "assistant", "content": answer})
         except Exception as e:
             logger.error(f"Inference failed: {e}")
-            history.append([message, f"⚠️ 推理出错：{str(e)}"])
+            history.append({"role": "user", "content": message})
+            history.append({"role": "assistant", "content": f"⚠️ 推理出错：{str(e)}"})
 
         return history, self
 
@@ -104,7 +108,10 @@ def _build_chatbot_kwargs() -> dict:
         "label": "📝 对话记录",
         "height": 500,
     }
-    # show_copy_button 在 Gradio < 5 可用，>= 5 默认开启、参数移除
+    # Gradio >= 5: 使用新的 messages 格式 [{"role":"user","content":"..."}, ...]
+    if GRADIO_VERSION >= Version("5.0"):
+        kwargs["type"] = "messages"
+    # show_copy_button 在 Gradio < 5 可用，>= 5 已移除
     if GRADIO_VERSION < Version("5.0"):
         kwargs["show_copy_button"] = True
     return kwargs
@@ -191,7 +198,7 @@ def build_ui() -> gr.Blocks:
             outputs=[chatbot, session_state],
         )
 
-        def on_send(message: str, history: list, session: ChatSession) -> tuple:
+        def on_send(message: str, history: list[dict], session: ChatSession) -> tuple:
             """发送消息的处理函数。"""
             if not message.strip():
                 return "", history, session, "⚠️ 请输入问题"
