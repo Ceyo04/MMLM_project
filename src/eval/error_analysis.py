@@ -84,16 +84,25 @@ def classify_error(question: str, predicted: str, ground_truths: list[str]) -> s
 def analyze_errors(predictions_file: str, output_dir: str) -> dict[str, Any]:
     """
     分析预测文件中的错误。
+    兼容两种格式：旧版 predictions.json（直接列表）和新版 evaluate_results_*.json（含 details 键）。
 
     Args:
-        predictions_file: 评测生成的 predictions.json 路径
+        predictions_file: 评测结果 JSON 文件路径
         output_dir: 输出目录
 
     Returns:
         分析结果字典
     """
     with open(predictions_file, "r", encoding="utf-8") as f:
-        predictions = json.load(f)
+        raw = json.load(f)
+
+    # 兼容新旧格式
+    if isinstance(raw, dict) and "details" in raw:
+        predictions = raw["details"]
+    elif isinstance(raw, list):
+        predictions = raw
+    else:
+        raise ValueError(f"Unrecognized format in {predictions_file}")
 
     errors = [p for p in predictions if not p.get("correct", False)]
     successes = [p for p in predictions if p.get("correct", False)]
