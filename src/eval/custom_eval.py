@@ -53,12 +53,20 @@ def run_inference_on_custom_dataset(
 
     t_start = time.time()
 
+    # 数据集文件所在目录，用于解析相对路径
+    dataset_dir = Path(dataset_path).resolve().parent
+
     for item in dataset:
-        image_path = item["image"]
+        image_rel = item["image"]
         category = item.get("category", "auto")
         qa_pairs = item.get("qa_pairs", [])
 
-        if not Path(image_path).exists():
+        # 解析图片路径：优先绝对路径，否则相对 dataset 目录
+        image_path = Path(image_rel)
+        if not image_path.is_absolute():
+            image_path = dataset_dir / image_rel
+
+        if not image_path.exists():
             logger.warning(f"Image not found: {image_path}")
             continue
 
@@ -69,14 +77,14 @@ def run_inference_on_custom_dataset(
             try:
                 t_infer = time.time()
                 predicted, _ = generate_single(
-                    image_path,
+                    str(image_path),
                     question,
                     scene=category,
                 )
                 infer_time = time.time() - t_infer
 
                 predictions.append({
-                    "image": image_path,
+                    "image": str(image_path),
                     "category": category,
                     "question": question,
                     "predicted": predicted,

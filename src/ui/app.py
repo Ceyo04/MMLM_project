@@ -216,12 +216,30 @@ def main() -> None:
     """启动 Gradio Web UI。"""
     demo = build_ui()
     logger.info("Starting Gradio Web UI on 0.0.0.0:7860")
-    demo.launch(
-        server_name="0.0.0.0",
-        server_port=7860,
-        share=False,
-        show_error=True,
-    )
+    try:
+        demo.launch(
+            server_name="0.0.0.0",
+            server_port=7860,
+            share=False,
+            show_error=False,
+        )
+    except ValueError as e:
+        if "localhost is not accessible" in str(e):
+            logger.warning(
+                "WSL2: Gradio localhost check failed. This is expected in WSL2. "
+                "Please manually access from Windows browser at http://localhost:7860"
+            )
+            logger.info(
+                "Re-launching with share=True as fallback (creates a public tunnel)..."
+            )
+            demo.launch(
+                server_name="0.0.0.0",
+                server_port=7860,
+                share=True,
+                show_error=False,
+            )
+        else:
+            raise
 
 
 if __name__ == "__main__":
