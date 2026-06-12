@@ -30,7 +30,7 @@
 
 
 %%一些必要的宏包
-\RequirePackage[unicode=true,colorlinks,urlcolor=blue,linkcolor=blue,bookmarksnumbered=blue]{hyperref}
+\RequirePackage[unicode=true,colorlinks=true,urlcolor=blue,linkcolor=blue,bookmarksnumbered=true]{hyperref}
 
 \RequirePackage{latexsym,amssymb,amsmath,amsbsy,amsopn,amstext,amsthm,amsxtra,color,bm,calc,ifpdf}
 \RequirePackage{graphicx}
@@ -43,7 +43,6 @@
 \RequirePackage{fontspec}
 \RequirePackage{subfigure}
 \PassOptionsToPackage{hyphens}{url}
-\RequirePackage{hyperref}
 \RequirePackage{booktabs}
 \RequirePackage{tcolorbox}
 
