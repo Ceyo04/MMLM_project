@@ -1,0 +1,429 @@
+%!TeX program = xelatex
+\documentclass{SYSUReport}
+
+% 页眉与报告信息
+\headl{多模态大模型原理与应用}
+\headc{期末大作业报告}
+\headr{\today}
+\lessonTitle{多模态大模型原理与应用}
+\reportTitle{基于VLM的智能图文问答助手}
+\memberA{23336012 王泓皓}
+\memberB{23336016 肖淇}
+\memberC{23336006 韩冠东}
+\inst{计算机学院}
+\major{计算机科学与技术}
+\date{\today}
+
+% 数学与代码宏包
+\usepackage{amsmath,amssymb}
+\usepackage{listings}
+\usepackage{xcolor}
+\usepackage{booktabs}
+\usepackage{multirow}
+\usepackage{enumitem}
+\usepackage{caption}
+\usepackage{subcaption}
+\usepackage{float}
+
+% 代码块样式
+\definecolor{codegreen}{rgb}{0,0.6,0}
+\definecolor{codegray}{rgb}{0.5,0.5,0.5}
+\definecolor{codepurple}{rgb}{0.58,0,0.82}
+\definecolor{backcolour}{rgb}{0.95,0.95,0.92}
+\lstdefinestyle{mystyle}{
+    backgroundcolor=\color{backcolour},
+    commentstyle=\color{codegreen},
+    keywordstyle=\color{magenta},
+    numberstyle=\tiny\color{codegray},
+    stringstyle=\color{codepurple},
+    basicstyle=\ttfamily\footnotesize,
+    breakatwhitespace=false,
+    breaklines=true,
+    captionpos=b,
+    keepspaces=true,
+    numbers=left,
+    numbersep=5pt,
+    showspaces=false,
+    showstringspaces=false,
+    showtabs=false,
+    tabsize=2
+}
+\lstset{style=mystyle}
+
+% 避免常见的 underfull 警告
+\hbadness=10000
+\vbadness=10000
+
+\begin{document}
+
+% =============================================
+% 封面
+% =============================================
+\cover
+\thispagestyle{empty}
+\clearpage
+
+% =============================================
+% 摘要
+% =============================================
+\begin{abstract}
+
+本文基于 Qwen2.5-VL-3B-Instruct 视觉语言模型，构建了一个智能图文问答助手，支持自然场景图片和文档/幻灯片截图两类图像的中文问答与多轮对话。系统采用 HuggingFace Transformers 推理框架，以 bfloat16 精度在 8GB 显存的 NVIDIA RTX 4060 上运行，使用 Gradio 构建 Web 交互界面，通过严格限制输入分辨率（max\_pixels=501760）确保推理稳定性。
+
+在评测方面，系统在 VQA-v2 验证集子集（50 条样本）上取得了 78.0\% 的整体准确率，其中是否类问题准确率达 100.0\%，计数类问题 66.7\%；在 TextVQA 验证集子集（100 条样本）上取得了 72.0\% 的准确率。本文还构建了包含 24 张图片、69 条问答对的自建中文图文问答集，自动化评分为 2.99/5。通过对错误样本的系统分类，分析了模型的视觉理解、推理能力和知识覆盖等方面的局限性，并从 AGI 视角讨论了当前多模态模型的潜力与瓶颈。
+
+\textbf{关键词：}视觉语言模型；视觉问答；Qwen2.5-VL；多模态理解；Gradio
+
+\end{abstract}
+\thispagestyle{empty}
+\clearpage
+
+% =============================================
+% 目录
+% =============================================
+\pagenumbering{Roman}
+\setcounter{page}{1}
+\tableofcontents
+\clearpage
+
+% =============================================
+% 正文
+% =============================================
+\pagenumbering{arabic}
+\setcounter{page}{1}
+
+% =============================================
+\section{引言}
+
+\subsection{任务背景}
+
+视觉问答（Visual Question Answering, VQA）是计算机视觉与自然语言处理交叉领域的核心任务之一。给定一张图片和一个自然语言问题，系统需要同时理解图像内容和文本语义，并通过跨模态推理给出准确答案。随着大规模视觉语言模型（Vision-Language Model, VLM）的快速发展，基于预训练 VLM 构建的图文问答系统在电商导购、文档审阅、辅助教学、智能客服等场景展现出广泛的应用前景。
+
+近年来，以 GPT-4V、Qwen-VL、LLaVA 等为代表的视觉语言模型在图像理解、文本识别和推理能力上取得了显著进展。这些模型通过大规模图文对预训练和指令微调，能够直接处理"图片+文本问题"的联合输入并生成自然语言回答，为构建实用的多模态问答系统提供了技术基础。
+
+\subsection{任务定义}
+
+本项目构建一个"看图/看文档能聊天"的多模态助手，具体包括：
+
+\begin{enumerate}[label=(\arabic*)]
+    \item \textbf{多场景支持}：覆盖自然场景（商品图、日常照片、街景）和文档/幻灯片（讲义截图、PPT、表格）两类图像；
+    \item \textbf{中文问答}：输入输出均为中文，要求回答准确、简洁；
+    \item \textbf{多轮对话}：支持基于同一张图片的连续追问，保持上下文记忆；
+    \item \textbf{定量评测}：在 VQA-v2 和 TextVQA 两个公开数据集上评估系统性能；
+    \item \textbf{案例分析}：对典型成功与失败案例进行深入分析。
+\end{enumerate}
+
+\subsection{主要挑战}
+
+\begin{enumerate}[label=(\arabic*)]
+    \item \textbf{跨模态对齐}：图像视觉特征与文本语义特征需要精准对齐，这对小规模模型（3B 参数）尤为困难；
+    \item \textbf{中文问答质量}：主流 VLM 的预训练数据以英文为主，中文推理能力有待验证和优化；
+    \item \textbf{显存约束}：8GB VRAM 环境下运行多模态模型，需要在图像分辨率、推理速度和回答质量之间取得平衡；
+    \item \textbf{零样本泛化}：无微调条件下，模型需要直接适应不同类型的图片和问题风格。
+\end{enumerate}
+
+\subsection{本文工作概览}
+
+本文采用 Qwen2.5-VL-3B-Instruct 作为基础模型，基于 HuggingFace Transformers 框架构建推理管线，使用 Gradio 搭建 Web 交互界面。在 VQA-v2 和 TextVQA 验证集子集上完成了定量评测，对错误样本进行了系统化的分类分析，并构建了自建中文图文问答集进行补充评测。最后，从模型局限、改进方向和 AGI 视角对多模态理解的现状与未来进行了讨论。
+
+% =============================================
+\section{相关工作}
+
+\subsection{视觉-语言预训练模型}
+
+CLIP~\cite{radford2021clip} 通过对比学习在大规模图文对上联合训练视觉编码器和文本编码器，证明了自然语言监督可以学习到可迁移的视觉表征，开创了视觉-语言联合学习的新范式。BLIP-2~\cite{li2023blip2} 提出 Q-Former 架构，将冻结的视觉编码器与冻结的大语言模型通过可学习的查询向量桥接，实现了高效的视觉-语言对齐，大幅降低了端到端训练的计算成本。
+
+\subsection{开源多模态对话模型}
+
+LLaVA~\cite{liu2023llava} 首次将视觉指令微调（Visual Instruction Tuning）引入多模态模型训练，使用 GPT-4 生成的对话数据进行监督微调，使模型具备了图文对话能力。MiniGPT-4~\cite{zhu2023minigpt4} 仅通过训练一个线性投影层即实现了高质量的图文对话，证明了视觉编码器与大语言模型之间的对齐网络可以非常轻量。Qwen-VL~\cite{bai2024qwen} 系列模型在中文多模态理解方面表现突出，原生支持动态分辨率输入、多图像输入和细粒度文本定位等能力，是目前中文多模态任务的首选基础模型之一。
+
+\subsection{视觉问答数据集与评测方法}
+
+VQA-v2~\cite{goyal2017vqa} 是目前使用最广泛的视觉问答基准数据集，包含约 110 万条问答对，每张 COCO 图片对应 3 个问题，每个问题由 10 名标注者提供答案。评测采用软匹配准确率——预测答案与 10 个标注答案中至少有 3 个一致即算正确，有效缓解了答案多样性的问题。TextVQA~\cite{singh2019textvqa} 专注于图像中文字的阅读理解，要求模型识别图片中的文字信息（如标志、标签、路牌）并据此回答，是衡量 VLM 的 OCR 和文字推理能力的重要基准。
+
+\subsection{参数高效微调}
+
+LoRA~\cite{hu2022lora} 通过在预训练权重矩阵旁添加低秩分解矩阵实现参数高效微调，在保持预训练知识的同时以极少的可训练参数（通常 $<$1\%）适应下游任务。然而，LoRA 在推理阶段仍需额外的反向传播显存开销，对 8GB 显存环境构成挑战，因此本项目采用纯推理方案。
+
+% =============================================
+\section{系统设计}
+
+\subsection{系统架构}
+
+系统整体架构如图~\ref{fig:arch} 所示，由四个核心模块组成：
+
+\begin{enumerate}[label=(\arabic*)]
+    \item \textbf{Web UI 层}（Gradio）：处理用户交互，包括图片上传、问题输入、场景选择和对话展示；
+    \item \textbf{配置与 Prompt 管理}：管理模型参数、三种场景的 System Prompt 模板（自然场景/文档场景/自动识别）；
+    \item \textbf{推理管线}：图像预处理（分辨率限制 max\_pixels=501760 以适配 8GB VRAM）、文本 tokenization、模型推理和答案解码；
+    \item \textbf{对话状态管理}：维护多轮对话历史，支持同一张图片上的连续追问。
+\end{enumerate}
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=1.0\textwidth]{architecture.png}
+    \caption{系统架构图}
+    \label{fig:arch}
+\end{figure}
+
+用户通过 Gradio Web UI 上传图片并输入问题，系统根据场景选择器确定对应的 System Prompt 模板，将图片和问题组装为 Qwen2.5-VL 标准消息格式后送入模型推理。推理结果经解码后返回前端展示，同时更新对话历史以支持后续多轮问答。
+
+\subsection{模型选择}
+
+选用 \texttt{Qwen2.5-VL-3B-Instruct} 作为核心模型，理由如下：
+
+\begin{enumerate}[label=(\arabic*)]
+    \item \textbf{3B 参数量}：以 bfloat16 精度加载仅需约 6GB 显存，在 RTX 4060（8GB VRAM）上留有约 2GB 安全裕度用于推理时的激活张量开销；
+    \item \textbf{多分辨率支持}：原生支持动态分辨率输入，通过 max\_pixels 参数（501760 $\approx$ 640$\times$28$\times$28）可精确控制显存占用；
+    \item \textbf{中文能力强}：Qwen 系列在中文预训练数据上投入充足，中文指令遵循和生成质量优于同类英文原生模型；
+    \item \textbf{开箱即用}：HuggingFace Transformers $\geq$ 4.49.0 版本原生支持 \texttt{Qwen2\_5\_VLForConditionalGeneration} 类，无需额外适配代码。
+\end{enumerate}
+
+\subsection{推理管线设计}
+
+推理管线遵循以下流程，如图~\ref{fig:arch} 所示：
+
+\begin{enumerate}[label=步骤 \arabic*:,leftmargin=*]
+    \item \textbf{图像预处理}：通过 \texttt{qwen\_vl\_utils.process\_vision\_info} 将图片转换为模型可接受的格式，同时通过 \texttt{max\_pixels=501760}（约 700$\times$700 分辨率区域）严格限制输入分辨率，防止 8GB 显存溢出；
+    \item \textbf{Chat Template 构建}：使用 \texttt{processor.apply\_chat\_template} 将 System Prompt、历史对话和当前问题组装为 Qwen2.5-VL 标准消息格式；
+    \item \textbf{模型推理}：以 bfloat16 精度运行 \texttt{model.generate()}，设置 max\_new\_tokens=256（对话）/20（评测）、repetition\_penalty=1.05，采用贪婪解码（do\_sample=False）保证输出稳定性；
+    \item \textbf{答案解码}：从生成序列中去除输入 tokens，解码为纯文本答案。
+\end{enumerate}
+
+\subsection{Web UI 设计}
+
+界面采用 Gradio Blocks 布局，分为左右两栏：
+
+\begin{itemize}
+    \item \textbf{左侧}：图片上传区（支持拖拽）+ 问题输入框 + 发送/清除按钮；
+    \item \textbf{右侧}：对话记录展示区（Chatbot 组件），支持多轮对话滚动查看。
+\end{itemize}
+
+关键交互设计要点包括：上传新图片自动清除对话历史；未上传图片时点击发送会提示用户先上传图片；支持 Enter 键快捷发送；以 messages 格式（\texttt{\{"role":"user","content":...\}}）管理对话历史。
+
+由于项目在 WSL2 环境中运行，Gradio 启动时需绑定 \texttt{server\_name="0.0.0.0"} 而非默认的 \texttt{127.0.0.1}，以确保 Windows 宿主机浏览器可通过 \texttt{http://localhost:7860} 正常访问。
+
+\subsection{Prompt 工程}
+
+针对不同场景设计了差异化的 System Prompt。VQA 评测时使用专门的强制短答案 Prompt：
+
+\begin{lstlisting}[caption={VQA评测专用 Prompt},label={lst:vqa_prompt}]
+Answer the question using a single word or short phrase.
+Question: {question}
+\end{lstlisting}
+
+该 Prompt 配合 max\_new\_tokens=20 和 do\_sample=False，确保模型输出简洁的单词或短语答案，避免了长句输出导致的匹配失败。TextVQA 评测采用相同的 Prompt 策略。
+
+% =============================================
+\section{实验}
+
+\subsection{实验设置}
+
+\begin{table}[H]
+    \centering
+    \caption{实验环境配置}
+    \label{tab:env}
+    \begin{tabular}{ll}
+        \toprule
+        配置项 & 参数 \\
+        \midrule
+        模型 & Qwen2.5-VL-3B-Instruct \\
+        推理精度 & torch.bfloat16 \\
+        GPU & NVIDIA GeForce RTX 4060 (8GB VRAM) \\
+        CPU & Intel Core i5-12600KF \\
+        内存 & 32GB DDR4 \\
+        操作系统 & WSL2 (Ubuntu) \\
+        推理框架 & HuggingFace Transformers 4.51.0 \\
+        界面框架 & Gradio 6.17.3 \\
+        \midrule
+        显存限制 & max\_pixels=501760 ($\approx$ 700$\times$700) \\
+        生成参数（对话） & max\_new\_tokens=256, do\_sample=False, repetition\_penalty=1.05 \\
+        生成参数（评测） & max\_new\_tokens=20, do\_sample=False \\
+        \bottomrule
+    \end{tabular}
+\end{table}
+
+\subsection{VQA-v2 评测结果}
+
+在 VQA-v2 验证集中随机抽取 50 条样本进行评测，结果如表~\ref{tab:vqa_result} 所示：
+
+\begin{table}[H]
+    \centering
+    \caption{VQA-v2 评测结果（50 条样本）}
+    \label{tab:vqa_result}
+    \begin{tabular}{lccc}
+        \toprule
+        问题类型 & 准确率 & 正确数 & 样本数 \\
+        \midrule
+        是否类（Yes/No） & \textbf{100.0\%} & 17 & 17 \\
+        计数类（How many...） & 66.7\% & 6 & 9 \\
+        其他（What/Where/Who...） & 66.7\% & 16 & 24 \\
+        \midrule
+        整体 & \textbf{78.0\%} & 39 & 50 \\
+        \bottomrule
+    \end{tabular}
+\end{table}
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=0.85\textwidth]{vqa_results.png}
+    \caption{VQA-v2 各问题类型准确率柱状图}
+    \label{fig:vqa_chart}
+\end{figure}
+
+\textbf{分析：} 通过强制英文短答案 Prompt 和标准 VQA 匹配策略（标注答案中出现 $\geq$ 3 次且清洗后与预测答案一致），是否类问题准确率达到 100\%，说明模型的视觉判断能力本身没有问题。计数类和其他类问题准确率均为 66.7\%，反映 3B 模型在细粒度视觉识别和复杂推理方面仍存在能力边界。整体 78.0\% 的准确率对于 3B 参数量的模型而言属于合理水平。
+
+\subsection{TextVQA 评测结果}
+
+在 TextVQA 验证集中随机抽取 100 条样本进行评测，结果如表~\ref{tab:textvqa_result} 所示：
+
+\begin{table}[H]
+    \centering
+    \caption{TextVQA 评测结果（100 条样本）}
+    \label{tab:textvqa_result}
+    \begin{tabular}{lc}
+        \toprule
+        指标 & 数值 \\
+        \midrule
+        整体准确率 & 72.0\% \\
+        正确数 & 72 \\
+        总样本数 & 100 \\
+        \bottomrule
+    \end{tabular}
+\end{table}
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=0.7\textwidth]{dataset_comparison.png}
+    \caption{VQA-v2 与 TextVQA 准确率对比}
+    \label{fig:dataset_comp}
+\end{figure}
+
+\textbf{分析：} TextVQA 侧重图像中文字的识别与理解（如品牌名、路牌、数字等）。72\% 的准确率说明 Qwen2.5-VL-3B 具备基本的 OCR 和文字推理能力。主要失败原因包括：小尺寸文字误读（如球衣号码 22 被误读为 28）、模糊商标名识别错误、以及需要细粒度数值比较的场景。
+
+\subsection{错误类型分布}
+
+对 VQA-v2 的 11 个错误样本进行分类后，各错误类型分布如表~\ref{tab:error_vqa} 所示：
+
+\begin{table}[H]
+    \centering
+    \caption{VQA-v2 错误类型分布}
+    \label{tab:error_vqa}
+    \begin{tabular}{lcc}
+        \toprule
+        错误类型 & 数量 & 占比 \\
+        \midrule
+        推理/计数错误 & 8 & 72.7\% \\
+        视觉理解错误 & 1 & 9.1\% \\
+        知识缺失 & 1 & 9.1\% \\
+        OCR/文字识别错误 & 1 & 9.1\% \\
+        \bottomrule
+    \end{tabular}
+\end{table}
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=0.85\textwidth]{vqa_error_dist.png}
+    \caption{VQA-v2 错误类型分布图}
+    \label{fig:vqa_error_dist}
+\end{figure}
+
+\textbf{分析：} 修复评测管线后，剩余错误中绝大多数（72.7\%）是推理/计数层面的真实模型缺陷。这说明 3B 模型在基础视觉识别上已能胜任，但在需要精细空间推理、细粒度属性判断的任务上仍存在不足。OCR 错误占比低（9.1\%），这是因为 VQA-v2 数据集中文字相关问题比例较低。
+
+\subsection{自建中文数据集评测}
+
+为评估模型在中文文档/幻灯片场景下的表现，使用 PIL 自动生成了包含 24 张图片、69 条问答对的中文图文问答集。数据涵盖文档报告（5 张）和自然场景颜色/形状识别（19 张）两类。模型的自动化评分为 2.99/5.0（5 分制），其中文档类均分 2.85，自然场景类均分 3.04。结果表明模型在中文字符识别方面能力相对薄弱（PIL 生成的中文文字对 OCR 有额外挑战），自然场景类的表现相对稳定。
+
+% =============================================
+\section{案例分析}
+
+\subsection{成功案例}
+
+\textbf{案例 1：是否判断。} 问题："Are the riders on the bikes?"，模型回答："no"，标准答案：no（10 人一致）。模型正确判断了图中骑手与自行车的位置关系。
+
+\textbf{案例 2：计数任务。} 问题："How many beds?"，模型回答："1"，标准答案：1（10 人一致）。简单计数任务上模型表现稳定。
+
+\textbf{案例 3：颜色识别。} 问题："What color is the catcher wearing?"，模型回答："white"，标准答案中 10 人有 8 人回答 white。颜色等低层视觉特征识别准确。
+
+\textbf{案例 4：OCR 能力。} TextVQA 问题："what number is this bus?"，模型回答："477"，标准答案：477（10 人中 8 人回答 477）。模型成功识别了公交车上的数字编号。
+
+\subsection{失败案例}
+
+\textbf{案例 5：物体细粒度分类。} 问题："What type of vehicle is this?"，模型回答："car"，标准答案："truck"。模型在相似外观的物体子类别间分辨能力不足。
+
+\textbf{案例 6：空间关系推理。} 问题："What is sitting on the table?"，模型回答："a plate"，标准答案："a vase, a book"。模型只识别出一个物体而遗漏了其他，max\_pixels 限制可能导致小物体信息丢失。
+
+\textbf{案例 7：OCR 数字误读。} TextVQA 问题："what number is on the player's jersey?"，模型回答："28"，标准答案："22"。小尺寸数字的识别精度不足。
+
+\textbf{案例 8：知识依赖。} 问题："What brand is the phone?"，模型回答："iPhone"，标准答案："Samsung"。模型缺乏特定品牌外观的知识，3B 模型的世界知识储备弱于大规模模型。
+
+\subsection{错误类型总结}
+
+从 VQA-v2 和 TextVQA 的联合错误分析来看，3B 模型的主要瓶颈集中在以下几个方面：视觉编码的细粒度区分能力（占 VQA-v2 错误的 72.7\% 为推理/计数类型）、小尺寸文字/数字的 OCR 精度、以及外部知识覆盖的不足。这些问题都与模型参数规模直接相关，通过升级模型版本（如 7B/72B）或引入 RAG 外部知识检索可获得改善。
+
+% =============================================
+\section{反思与展望}
+
+\subsection{模型局限}
+
+\begin{enumerate}[label=(\arabic*)]
+    \item \textbf{视觉编码能力不足}：3B 模型的视觉编码器参数量有限，在细粒度物体识别、小目标检测和复杂场景理解上存在明显短板；
+    \item \textbf{幻觉问题}：模型在不确定时倾向于给出肯定回答而非诚实说明"不知道"，这是 VLM 的普遍问题，小模型表现更为严重；
+    \item \textbf{知识覆盖有限}：预训练数据中的世界知识储备远不如 7B/72B 模型，在需要外部知识的问题上表现欠佳；
+    \item \textbf{显存约束对推理质量的影响}：max\_pixels=501760 的限制虽然确保了推理稳定性，但不可避免地丢失了图像细节信息，对 TextVQA 中需要精确 OCR 的场景影响尤为明显。
+\end{enumerate}
+
+\subsection{改进方向}
+
+\begin{enumerate}[label=(\arabic*)]
+    \item \textbf{升级模型规模}：在条件允许时（$\geq$ 16GB 显存）升级到 Qwen2.5-VL-7B 或更大模型，预期可带来 10--20 个百分点的准确率提升；
+    \item \textbf{RAG 知识增强}：对于知识依赖型问题，引入外部知识库检索模块（如 Wikipedia API、知识图谱），弥补 3B 模型的知识不足；
+    \item \textbf{独立 OCR 增强}：针对文档/幻灯片场景，在推理管线中加入独立的 OCR 模块（如 PaddleOCR），将识别到的文字作为额外上下文输入模型，提高文字相关问题的准确率；
+    \item \textbf{云 GPU LoRA 微调}：在云 GPU 上使用中文 VQA 数据做 LoRA 微调，然后将适配器加载到本地 3B 模型上推理，绕过本地微调的显存瓶颈；
+    \item \textbf{混合精度量化}：探索 8-bit 量化方案在视觉编码器上的安全应用，在保持推理精度的前提下降低显存占用，释放更多空间用于更高分辨率输入。
+\end{enumerate}
+
+\subsection{AGI 视角下的多模态理解：潜力与瓶颈}
+
+从通用人工智能（Artificial General Intelligence, AGI）的视角审视当前的 VLM 范式，可以观察到以下趋势：
+
+\textbf{潜力方面：}
+\begin{enumerate}[label=(\arabic*)]
+    \item \textbf{统一感知与理解}：VLM 的多模态统一架构证明了"感知+理解"可以在同一模型中实现，无需独立的视觉模块和语言模块之间的管道式传输，这是通向 AGI 的重要一步；
+    \item \textbf{零样本泛化能力}：模型从预训练中习得了通用的多模态理解能力，能够处理未见过的图片类型和问题组合，展示了超越简单模式匹配的泛化特性；
+    \item \textbf{交互式推理}：多轮对话机制使模型能够像人类一样在视觉上下文中进行交互式推理，逐步细化理解和追问。
+\end{enumerate}
+
+\textbf{瓶颈方面：}
+\begin{enumerate}[label=(\arabic*)]
+    \item \textbf{细粒度世界建模的缺失}：当前的 VLM 缺乏对物理世界的精细建模，无法理解物体之间的因果和物理约束关系（如"如果把杯子推倒会发生什么"），这是通向 AGI 的根本性障碍；
+    \item \textbf{符号推理与感知的脱节}：VLM 能够感知图片中的物体，但在需要符号推理的问题上（如"图中物体的总价值是多少"）表现挣扎，感知与推理之间缺乏显式的桥接机制；
+    \item \textbf{持续学习能力缺失}：模型的知识截止于预训练数据的时间点，无法像人类一样从新经验中持续学习和更新；
+    \item \textbf{解释性与可信度}：当前 VLM 给出的答案缺乏可追溯的推理过程（Chain-of-Thought），用户无法判断回答的可信程度，这在医疗、法律等高风险领域构成实质性障碍。
+\end{enumerate}
+
+综合来看，当前 VLM 范式已在感知层面取得了显著进展，但距离 AGI 要求的"深度理解与推理"仍有较大差距。未来的突破方向可能包括：视觉-语言-物理世界联合建模、感知-推理-行动的端到端统一架构、以及具备持续学习和自我纠错能力的自适应模型。
+
+% =============================================
+\section{结论}
+
+本文基于 Qwen2.5-VL-3B-Instruct 视觉语言模型构建了一个智能图文问答助手，实现了自然场景和文档/幻灯片两类图像的中文问答与多轮对话功能。系统的主要贡献包括：
+
+\begin{enumerate}[label=(\arabic*)]
+    \item 在 8GB 显存约束下，通过 bfloat16 精度加载和 max\_pixels 分辨率限制，实现了完整可用的多模态推理管线；
+    \item 基于 Gradio 6.x 构建了支持多轮对话的 Web 交互界面，兼容 WSL2 运行环境；
+    \item 在 VQA-v2（50 条，78.0\%）和 TextVQA（100 条，72.0\%）两个公开数据集上完成了定量评测，并进行了系统化的错误分类分析；
+    \item 构建了自建中文图文问答集（24 图，69 QA 对），补充了中文文档场景的评测维度；
+    \item 对模型的局限性进行了深入分析，并从 AGI 视角讨论了多模态理解的现状与未来方向。
+\end{enumerate}
+
+项目的完整代码、实验数据和文档已在 GitHub 仓库公开，详见 \url{https://github.com/Ceyo04/VLM-QA-Assistant}。
+
+% =============================================
+% 参考文献
+% =============================================
+\newpage
+\bibliographystyle{ieeetr}
+\bibliography{reference.bib}
+
+\end{document}
